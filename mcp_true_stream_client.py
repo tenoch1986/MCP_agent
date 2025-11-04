@@ -287,9 +287,14 @@ class MCPTrueStreamClient:
 <invoke name="工具名称">
 <parameter name="参数名">参数值</parameter>
 </invoke>
+<invoke name="另一个工具名称">
+<parameter name="参数名">参数值</parameter>
+</invoke>
 </function_calls>
 
-3. 保持对话自然流畅，用中文回复"""
+3. 如果一次需要调用多个工具，请在同一个 <function_calls> 块中包含所有工具调用
+4. 系统会等待所有工具调用完成后再统一处理结果
+5. 保持对话自然流畅，用中文回复"""
 
         # 记录工具列表详细信息
         tools_details = []
@@ -417,7 +422,7 @@ class MCPTrueStreamClient:
             return f"处理工具结果失败: {e}"
     
     def _extract_tool_calls(self, response_content: str) -> List[Dict[str, Any]]:
-        """从 LLM 响应中提取工具调用信息"""
+        """从 LLM 响应中提取工具调用信息 - 支持多个工具调用"""
         import re
         
         tool_calls = []
@@ -427,17 +432,16 @@ class MCPTrueStreamClient:
         function_call_matches = re.findall(function_call_pattern, response_content, re.DOTALL)
         
         for call_block in function_call_matches:
-            # 提取工具名称
-            tool_name_pattern = r'<invoke name="([^"]+)">'
-            tool_name_match = re.search(tool_name_pattern, call_block)
+            # 提取所有工具调用
+            tool_pattern = r'<invoke name="([^"]+)">(.*?)</invoke>'
+            tool_matches = re.findall(tool_pattern, call_block, re.DOTALL)
             
-            if tool_name_match:
-                tool_name = tool_name_match.group(1)
+            for tool_name, tool_content in tool_matches:
                 arguments = {}
                 
                 # 提取参数
                 param_pattern = r'<parameter name="([^"]+)">([^<]+)</parameter>'
-                param_matches = re.findall(param_pattern, call_block)
+                param_matches = re.findall(param_pattern, tool_content)
                 
                 for param_name, param_value in param_matches:
                     arguments[param_name] = param_value

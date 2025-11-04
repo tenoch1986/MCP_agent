@@ -74,6 +74,34 @@ python mcp_true_stream_client.py
 - 工号D0005的员工目前位于上海总部B座5楼工位
 ```
 
+### 🆕 多工具批量调用（最新功能）
+```
+💬 You: 查询员工D0005的姓名和当前位置
+🤖 Assistant: 🤔 正在思考...
+<function_calls>
+<invoke name="query_employee">
+<parameter name="employee_id">D0005</parameter>
+</invoke>
+<invoke name="get_employee_location">
+<parameter name="employee_id">D0005</parameter>
+</invoke>
+</function_calls>
+🔧 正在调用工具: query_employee
+   参数: {'employee_id': 'D0005'}
+🔧 正在调用工具: get_employee_location
+   参数: {'employee_id': 'D0005'}
+[INFO] 调用工具: query_employee 参数: {'employee_id': 'D0005'}
+[INFO] 调用工具: get_employee_location 参数: {'employee_id': 'D0005'}
+✅ 工具调用完成
+🤔 正在整合结果...
+根据查询结果，员工D0005的姓名是殖守，目前位于上海总部B座5楼工位。
+```
+
+**多工具调用优势：**
+- 🚀 **一次请求，多个工具**：LLM 可以同时调用多个相关工具
+- ⏱️ **批量处理**：系统等待所有工具返回结果后再统一处理
+- 🎯 **智能整合**：AI 自动整合多个工具的结果生成自然回答
+
 ### 问天气
 ```
 💬 You: 北京今天天气如何？
@@ -192,6 +220,7 @@ python mcp_true_stream_client.py
 - **真正的流式输出**（思考过程实时显示）
 - 智能工具路由和调用
 - 完善的调试日志系统
+- **🆕 多工具批量调用**（一次请求调用多个工具）
 
 ### 🔄 计划中
 - 更清晰的服务器分类管理
