@@ -57,13 +57,22 @@ class MCPServerManager:
         self.load_config()
         
     def load_config(self):
-        """加载服务器配置（不加载状态，状态实时查询）"""
+        """加载服务器配置（状态实时查询，不存储）"""
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     
                 for server_name, server_data in data.items():
+                    # 跳过自动发现的重复服务器
+                    if server_name.startswith("discovered_server_"):
+                        port = server_data.get('port')
+                        # 检查是否已经有对应端口的配置服务器
+                        existing_server = self._find_server_by_port(port)
+                        if existing_server:
+                            print(f"[INFO] 跳过重复的发现服务器: {server_name} (已有 {existing_server})")
+                            continue
+                    
                     config = MCPServerConfig(
                         name=server_name,
                         description=server_data.get('description', ''),
@@ -87,6 +96,13 @@ class MCPServerManager:
                 self._create_default_config()
         else:
             self._create_default_config()
+            
+    def _find_server_by_port(self, port: int) -> Optional[str]:
+        """根据端口号查找服务器名称"""
+        for name, config in self.servers.items():
+            if config.port == port and not name.startswith("discovered_server_"):
+                return name
+        return None
             
     def _create_default_config(self):
         """创建默认配置"""
@@ -233,23 +249,66 @@ class MCPServerManager:
         
     def stop_server(self, name: str):
         """停止指定的 MCP 服务器"""
+        stopped = False
+        
+        # 方法1: 如果服务器在 processes 字典中，直接停止进程
         if name in self.processes:
             process = self.processes[name]
             try:
                 process.terminate()
                 process.wait(timeout=5)
-                print(f"[INFO] 停止服务器 {name}")
+                print(f"[INFO] 停止服务器 {name} (通过进程管理)")
+                stopped = True
             except subprocess.TimeoutExpired:
                 process.kill()
                 print(f"[WARN] 强制停止服务器 {name}")
+                stopped = True
             except Exception as e:
                 print(f"[ERROR] 停止服务器 {name} 失败: {e}")
                 
             del self.processes[name]
+        
+        # 方法2: 如果服务器有 PID，尝试通过 PID 停止
+        if name in self.servers and not stopped:
+            config = self.servers[name]
+            if config.pid and self._is_process_running(config.pid):
+                try:
+                    process = psutil.Process(config.pid)
+                    process.terminate()
+                    process.wait(timeout=5)
+                    print(f"[INFO] 停止服务器 {name} (通过 PID: {config.pid})")
+                    stopped = True
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    print(f"[INFO] 服务器 {name} 进程已不存在 (PID: {config.pid})")
+                    stopped = True
+                except psutil.TimeoutExpired:
+                    try:
+                        process.kill()
+                        print(f"[WARN] 强制停止服务器 {name} (PID: {config.pid})")
+                        stopped = True
+                    except:
+                        print(f"[ERROR] 无法强制停止服务器 {name} (PID: {config.pid})")
+                except Exception as e:
+                    print(f"[ERROR] 停止服务器 {name} 失败: {e}")
+        
+        # 方法3: 如果服务器是 SSE 类型，检查健康状态并标记为停止
+        if name in self.servers and not stopped:
+            config = self.servers[name]
+            if config.transport_type == MCPTransportType.SSE:
+                if not self._check_server_health(config):
+                    print(f"[INFO] 服务器 {name} 已停止 (健康检查失败)")
+                    stopped = True
+                else:
+                    print(f"[WARN] 无法停止服务器 {name} - 仍在运行")
             
+        # 更新服务器状态
         if name in self.servers:
-            self.servers[name].status = "stopped"
-            self.servers[name].pid = None
+            if stopped:
+                self.servers[name].status = "stopped"
+                self.servers[name].pid = None
+            else:
+                # 如果无法停止，至少更新状态为未知
+                self.servers[name].status = "unknown"
             self.save_config()
             
     def start_all_servers(self):
@@ -266,7 +325,8 @@ class MCPServerManager:
         """停止所有服务器"""
         print("[INFO] 停止所有 MCP 服务器...")
         
-        for name in list(self.processes.keys()):
+        # 停止所有已知的服务器，而不仅仅是 processes 中的
+        for name in self.servers.keys():
             self.stop_server(name)
             
         print("[INFO] 所有服务器已停止")
@@ -282,11 +342,33 @@ class MCPServerManager:
         return False
         
     def get_server_status(self, name: str) -> Dict[str, Any]:
-        """获取服务器状态信息"""
+        """获取服务器状态信息（实时查询）"""
         if name not in self.servers:
             return {"error": f"服务器不存在: {name}"}
             
         config = self.servers[name]
+        
+        # 实时检查服务器状态
+        if config.transport_type == MCPTransportType.SSE:
+            if self._check_server_health(config):
+                config.status = "running"
+            else:
+                # 如果健康检查失败，检查进程是否还在运行
+                if config.pid and self._is_process_running(config.pid):
+                    config.status = "running"
+                else:
+                    config.status = "stopped"
+        elif config.transport_type == MCPTransportType.STDIO:
+            if name in self.processes:
+                process = self.processes[name]
+                if process.poll() is None:  # 进程还在运行
+                    config.status = "running"
+                else:
+                    config.status = "stopped"
+                    config.pid = None
+            else:
+                config.status = "stopped"
+        
         status = {
             "name": config.name,
             "description": config.description,
@@ -303,6 +385,14 @@ class MCPServerManager:
             
         return status
         
+    def _is_process_running(self, pid: int) -> bool:
+        """检查进程是否在运行"""
+        try:
+            process = psutil.Process(pid)
+            return process.is_running()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            return False
+        
     def list_servers(self) -> List[Dict[str, Any]]:
         """列出所有服务器状态"""
         return [self.get_server_status(name) for name in self.servers.keys()]
@@ -311,19 +401,25 @@ class MCPServerManager:
         """发现正在运行的 MCP 服务器"""
         print("[INFO] 扫描正在运行的 MCP 服务器...")
         
-        # 这里可以实现自动发现逻辑
-        # 例如扫描特定端口范围，检查进程等
+        # 扫描端口范围
+        common_ports = range(8000, 8100)  # 限制扫描范围，避免太慢
         
-        # 临时实现：检查已知端口的服务器
-        common_ports = range(8000,8999)
-        
+        discovered_count = 0
         for port in common_ports:
             url = f"http://127.0.0.1:{port}/sse"
             try:
-                resp = requests.head(url, timeout=2)
+                resp = requests.head(url, timeout=1)
                 if resp.status_code == 200:
-                    server_name = f"discovered_server_{port}"
-                    if server_name not in self.servers:
+                    # 检查是否已经有配置的服务器使用这个端口
+                    existing_server = self._find_server_by_port(port)
+                    if existing_server:
+                        print(f"[INFO] 端口 {port} 已被配置服务器 {existing_server} 使用")
+                        # 更新现有服务器的状态
+                        self.servers[existing_server].status = "running"
+                        self.save_config()
+                    else:
+                        # 创建新的发现服务器配置
+                        server_name = f"discovered_server_{port}"
                         config = MCPServerConfig(
                             name=server_name,
                             description=f"自动发现的 MCP 服务器 (端口 {port})",
@@ -334,9 +430,12 @@ class MCPServerManager:
                             status="running"
                         )
                         self.add_server(config)
-                        print(f"[INFO] 发现服务器: {server_name}")
+                        print(f"[INFO] 发现服务器: {server_name} (端口 {port})")
+                        discovered_count += 1
             except:
                 continue
+        
+        print(f"[INFO] 发现完成，共发现 {discovered_count} 个新服务器")
 
 def main():
     """MCP 服务器管理器主程序"""
